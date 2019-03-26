@@ -222,6 +222,12 @@ impl<E> ActiveW5500<'_, '_, '_, E> {
         Ok(())
     }
 
+    pub fn has_link(&mut self) -> Result<bool, E> {
+        let mut state = [0u8; 1];
+        self.read_from(Register::CommonRegister(0x00_2E_u16), &mut state);
+        Ok(state[0] & ((1 << 0) as u8) != 0)
+    }
+
     fn is_interrupt_set(&mut self, socket: Socket, interrupt: Interrupt) -> Result<bool, E> {
         let mut state = [0u8; 1];
         self.read_from(socket.at(SocketRegister::Interrupt), &mut state)?;
@@ -320,6 +326,10 @@ pub trait IntoUdpSocket<E> {
     fn try_into_udp_server_socket(self, port: u16) -> Result<UdpSocket, E>
     where
         Self: Sized;
+
+    fn try_into_udp_client_socket(self, port: u16) -> Result<UdpSocket, E>
+        where
+            Self: Sized;
 }
 
 impl<E> IntoUdpSocket<UninitializedSocket>
@@ -338,6 +348,25 @@ impl<E> IntoUdpSocket<UninitializedSocket>
                     Protocol::UDP as u8,       // Socket Mode Register
                     SocketCommand::Open as u8, // Socket Command Register
                 ],
+            )?;
+            Ok(UdpSocket(socket))
+        })()
+        .map_err(|_: E| UninitializedSocket(socket))
+    }
+
+    fn try_into_udp_client_socket(self, port: u16) -> Result<UdpSocket, UninitializedSocket> {
+        let socket = (self.1).0;
+        (|| {
+            self.0.reset_interrupt(socket, Interrupt::SendOk)?;
+
+            self.0
+                .write_u16(socket.at(SocketRegister::DestinationPort), port)?;
+            self.0.write_to(
+                socket.at(SocketRegister::Mode),
+                &[
+                    Protocol::UDP as u8,
+                    SocketCommand::Open as u8,
+                ]
             )?;
             Ok(UdpSocket(socket))
         })()
