@@ -99,6 +99,7 @@ pub enum ArpResponses {
 }
 
 pub struct UninitializedSocket(Socket);
+pub struct TcpSocket(Socket);
 pub struct UdpSocket(Socket);
 
 pub struct W5500<'a> {
@@ -322,6 +323,31 @@ impl<E> ActiveW5500<'_, '_, '_, E> {
     }
 }
 
+pub trait IntoTcpSocket<E> {
+    fn try_into_tcp_client_socket(self, port: u16) -> Result<TcpSocket, E>
+    where
+        Self: Sized;
+}
+
+impl<E> IntoTcpSocket<UninitializedSocket>
+    for (&mut ActiveW5500<'_, '_, '_, E>, UninitializedSocket)
+{
+    fn try_into_tcp_client_socket(self, port: u16) -> Result<TcpSocket, UninitializedSocket> {
+        let socket = (self.1).0;
+        (|| {
+            self.0.reset_interrupt(socket, Interrupt::SendOk)?;
+
+            self.0.write_u16(socket.at(SocketRegister::LocalPort), port)?;
+            self.0.write_to(socket.at(SocketRegister::Mode), &[
+                Protocol::TCP as u8,
+                SocketCommand::Open as u8,
+            ])?;
+            Ok(TcpSocket(socket))
+        })()
+        .map_err(|_: E| UninitializedSocket(socket))
+    }
+}
+
 pub trait IntoUdpSocket<E> {
     fn try_into_udp_server_socket(self, port: u16) -> Result<UdpSocket, E>
     where
@@ -371,6 +397,26 @@ impl<E> IntoUdpSocket<UninitializedSocket>
             Ok(UdpSocket(socket))
         })()
         .map_err(|_: E| UninitializedSocket(socket))
+    }
+}
+
+pub trait Tcp<E> {
+    fn receive(&mut self, target_buffer: &mut [u8]) -> Result<Option<(IpAddress, u16, usize)>, E>;
+    fn blocking_send(
+        &mut self,
+        host: &IpAddress,
+        host_port: u16,
+        data: &[u8],
+    ) -> Result<(), E>;
+}
+
+impl<E> Tcp<E> for (&mut ActiveW5500<'_, '_, '_, E>, &TcpSocket) {
+    fn receive(&mut self, target_buffer: &mut [u8]) -> Result<Option<(IpAddress, u16, usize)>, E> {
+        unimplemented!()
+    }
+
+    fn blocking_send(&mut self, host: &IpAddress, host_port: u16, data: &[u8]) -> Result<(), E> {
+        unimplemented!()
     }
 }
 
@@ -446,8 +492,8 @@ impl<E> Udp<E> for (&mut ActiveW5500<'_, '_, '_, E>, &UdpSocket) {
 
         {
             let local_port = w5500.read_u16(socket.at(SocketRegister::LocalPort))?;
-            let local_port = u16_to_be_bytes(local_port);
-            let host_port = u16_to_be_bytes(host_port);
+            let local_port = local_port.to_be_bytes();
+            let host_port = host_port.to_be_bytes();
 
             w5500.write_to(
                 socket.at(SocketRegister::LocalPort),
@@ -472,7 +518,7 @@ impl<E> Udp<E> for (&mut ActiveW5500<'_, '_, '_, E>, &UdpSocket) {
 
         let data_length = data.len() as u16;
         {
-            let data_length = u16_to_be_bytes(data_length);
+            let data_length = data_length.to_be_bytes();
 
             // TODO why write [0x00, 0x00] at TxReadPointer at all?
             // TODO Is TxWritePointer not sufficient enough?
@@ -515,12 +561,6 @@ impl<E> Udp<E> for (&mut ActiveW5500<'_, '_, '_, E>, &UdpSocket) {
     }
 }
 
-
-fn u16_to_be_bytes(u16: u16) -> [u8; 2] {
-    let mut bytes = [0u8; 2];
-    BigEndian::write_u16(&mut bytes, u16);
-    bytes
-}
 
 #[repr(u8)]
 #[derive(Copy, Clone, PartialEq, Debug)]
