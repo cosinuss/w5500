@@ -103,6 +103,7 @@ pub struct TcpSocket(Socket);
 pub struct UdpSocket(Socket);
 
 pub struct W5500<'a> {
+    local_port: u16,
     chip_select: &'a mut OutputPin,
     sockets: u8, // each bit represents whether the corresponding socket is available for take
 }
@@ -110,6 +111,7 @@ pub struct W5500<'a> {
 impl<'b, 'a: 'b> W5500<'a> {
     fn new(chip_select: &mut OutputPin) -> W5500 {
         W5500 {
+            local_port: 40000,
             chip_select,
             sockets: 0xFF,
         }
@@ -259,7 +261,8 @@ impl<E> ActiveW5500<'_, '_, '_, E> {
             register.control_byte() | COMMAND_READ | VARIABLE_DATA_LENGTH,
         ];
         BigEndian::write_u16(&mut request[..2], register.address());
-        let result = self.write_bytes(&request)
+        let result = self
+            .write_bytes(&request)
             .and_then(|_| self.read_bytes(target));
         self.chip_deselect();
         result
@@ -295,7 +298,8 @@ impl<E> ActiveW5500<'_, '_, '_, E> {
             register.control_byte() | COMMAND_WRITE | VARIABLE_DATA_LENGTH,
         ];
         BigEndian::write_u16(&mut request[..2], register.address());
-        let result = self.write_bytes(&request)
+        let result = self
+            .write_bytes(&request)
             .and_then(|_| self.write_bytes(data));
         self.chip_deselect();
         result
@@ -323,25 +327,84 @@ impl<E> ActiveW5500<'_, '_, '_, E> {
     }
 }
 
+
 pub trait IntoTcpSocket<E> {
-    fn try_into_tcp_client_socket(self, port: u16) -> Result<TcpSocket, E>
-    where
-        Self: Sized;
+    fn try_into_tcp_server_socket(self, port: u16) -> Result<TcpSocket, E>;
+    fn try_into_tcp_client_socket(self, ip: IpAddress, port: u16) -> Result<TcpSocket, E>;
 }
 
 impl<E> IntoTcpSocket<UninitializedSocket>
     for (&mut ActiveW5500<'_, '_, '_, E>, UninitializedSocket)
 {
-    fn try_into_tcp_client_socket(self, port: u16) -> Result<TcpSocket, UninitializedSocket> {
+    fn try_into_tcp_server_socket(self, port: u16) -> Result<TcpSocket, UninitializedSocket> {
+        let socket = (self.1).0;
+        (|| {
+            self.0.reset_interrupt(socket, Interrupt::SendOk)?;
+            self.0.write_u16(socket.at(SocketRegister::LocalPort), (self.0).0.local_port)?;
+            (self.0).0.local_port += 1;
+            self.0.write_to(
+                socket.at(SocketRegister::Mode),
+                &[
+                    Protocol::TCP as u8,       // Socket Mode Register
+                    SocketCommand::Open as u8, // Socket Command Register
+                ],
+            )?;
+            while self.0.read_u8(socket.at(SocketRegister::Status))? & SocketStatus::Closed as u8
+                > 0
+            {}
+            self.0.write_to(
+                socket.at(SocketRegister::Mode),
+                &[Protocol::TCP as u8, SocketCommand::Listen as u8],
+            );
+            while self.0.read_u8(socket.at(SocketRegister::Status))? & SocketStatus::Listen as u8
+                == 0
+            {}
+            Ok(TcpSocket(socket))
+        })()
+        .map_err(|_: E| UninitializedSocket(socket))
+    }
+
+    fn try_into_tcp_client_socket(
+        self,
+        ip: IpAddress,
+        port: u16,
+    ) -> Result<TcpSocket, UninitializedSocket> {
         let socket = (self.1).0;
         (|| {
             self.0.reset_interrupt(socket, Interrupt::SendOk)?;
 
-            self.0.write_u16(socket.at(SocketRegister::LocalPort), port)?;
-            self.0.write_to(socket.at(SocketRegister::Mode), &[
-                Protocol::TCP as u8,
-                SocketCommand::Open as u8,
-            ])?;
+            let rtr_read = self.0.read_u16(socket.at(SocketRegister::RetryTimeRegister))?;
+            let rcr_read = self.0.read_u8(socket.at(SocketRegister::RetryCountRegister))?;
+
+            self.0.write_u16(socket.at(SocketRegister::RetryTimeRegister), 200);
+            self.0.write_u8(socket.at(SocketRegister::RetryCountRegister), 3);
+
+            self.0.write_u16(socket.at(SocketRegister::LocalPort), (self.0).0.local_port)?;
+            (self.0).0.local_port += 1;
+            self.0.write_u16(socket.at(SocketRegister::DestinationPort), port)?;
+            self.0.write_to(socket.at(SocketRegister::DestinationIp), &ip.address)?;
+            self.0.write_to(
+                socket.at(SocketRegister::Mode),
+                &[
+                    Protocol::TCP as u8,       // Socket Mode Register
+                    SocketCommand::Open as u8, // Socket Command Register
+                ],
+            )?;
+            while self.0.read_u8(socket.at(SocketRegister::Status))? & SocketStatus::Closed as u8
+                > 0
+            {}
+            self.0.write_to(
+                socket.at(SocketRegister::Mode),
+                &[Protocol::TCP as u8, SocketCommand::Connect as u8],
+            )?;
+            while self.0.read_u8(socket.at(SocketRegister::Status))?
+                & SocketStatus::Established as u8
+                == 0
+            {}
+
+            self.0.write_u16(socket.at(SocketRegister::RetryTimeRegister), rtr_read);
+            self.0.write_u8(socket.at(SocketRegister::RetryCountRegister), rcr_read);
+
             Ok(TcpSocket(socket))
         })()
         .map_err(|_: E| UninitializedSocket(socket))
@@ -354,8 +417,8 @@ pub trait IntoUdpSocket<E> {
         Self: Sized;
 
     fn try_into_udp_client_socket(self, port: u16) -> Result<UdpSocket, E>
-        where
-            Self: Sized;
+    where
+        Self: Sized;
 }
 
 impl<E> IntoUdpSocket<UninitializedSocket>
@@ -389,10 +452,7 @@ impl<E> IntoUdpSocket<UninitializedSocket>
                 .write_u16(socket.at(SocketRegister::DestinationPort), port)?;
             self.0.write_to(
                 socket.at(SocketRegister::Mode),
-                &[
-                    Protocol::UDP as u8,
-                    SocketCommand::Open as u8,
-                ]
+                &[Protocol::UDP as u8, SocketCommand::Open as u8],
             )?;
             Ok(UdpSocket(socket))
         })()
@@ -402,32 +462,167 @@ impl<E> IntoUdpSocket<UninitializedSocket>
 
 pub trait Tcp<E> {
     fn receive(&mut self, target_buffer: &mut [u8]) -> Result<Option<(IpAddress, u16, usize)>, E>;
-    fn blocking_send(
-        &mut self,
-        host: &IpAddress,
-        host_port: u16,
-        data: &[u8],
-    ) -> Result<(), E>;
+    fn blocking_send(&mut self, data: &[u8]) -> Result<(), E>;
+    fn disconnect(&mut self) -> Result<(), E>;
+    fn reconnect(&mut self) -> Result<(), E>;
+    fn is_connected(&mut self) -> bool;
 }
 
 impl<E> Tcp<E> for (&mut ActiveW5500<'_, '_, '_, E>, &TcpSocket) {
-    fn receive(&mut self, target_buffer: &mut [u8]) -> Result<Option<(IpAddress, u16, usize)>, E> {
-        unimplemented!()
+    fn receive(&mut self, destination: &mut [u8]) -> Result<Option<(IpAddress, u16, usize)>, E> {
+        let (w5500, TcpSocket(socket)) = self;
+
+        if w5500.read_u8(socket.at(SocketRegister::Status))? & 0x17 == 0 {
+            return Ok(None);
+        }
+
+        if w5500.read_u8(socket.at(SocketRegister::InterruptMask))? & 0x04 == 0 {
+            return Ok(None);
+        }
+
+        let receive_size = loop {
+            let s0 = w5500.read_u16(socket.at(SocketRegister::RxReceivedSize))?;
+            let s1 = w5500.read_u16(socket.at(SocketRegister::RxReceivedSize))?;
+            if s0 == s1 {
+                break s0 as u16;
+            }
+        };
+
+        if receive_size > 0 {
+            let read_pointer = w5500.read_u16(socket.at(SocketRegister::RxReadPointer))?;
+
+            let ip = w5500.read_ip(socket.at(SocketRegister::DestinationIp))?;
+            let port = w5500.read_u16(socket.at(SocketRegister::DestinationPort))?;
+
+            // reset
+            w5500.write_u16(
+                socket.at(SocketRegister::RxReadPointer),
+                read_pointer.overflowing_add(receive_size).0 as u16,
+            )?;
+            w5500.write_u8(
+                socket.at(SocketRegister::Command),
+                SocketCommand::Recv as u8,
+            )?;
+
+            Ok(Some((ip, port, receive_size as usize)))
+        } else {
+            Ok(None)
+        }
     }
 
-    fn blocking_send(&mut self, host: &IpAddress, host_port: u16, data: &[u8]) -> Result<(), E> {
-        unimplemented!()
+    fn blocking_send(&mut self, data: &[u8]) -> Result<(), E> {
+        let (w5500, TcpSocket(socket)) = self;
+
+        let data_length = data.len() as u16;
+
+        let tx_buffer_size = w5500.read_u16(socket.at(SocketRegister::TransmitBuffer))?;
+        let rx_read_pointer = w5500.read_u16(socket.at(SocketRegister::TxReadPointer))?;
+
+        w5500.write_to(
+            socket.tx_register_at(rx_read_pointer),
+            &data[..data_length as usize],
+        )?;
+
+        // reset
+        let tx_write_pointer = w5500.read_u16(socket.at(SocketRegister::TxWritePointer))?;
+        w5500.write_u16(
+            socket.at(SocketRegister::TxWritePointer),
+            tx_write_pointer.overflowing_add(data_length as u16).0,
+        )?;
+
+        w5500.write_to(
+            socket.at(SocketRegister::Command),
+            &[SocketCommand::Send as u8],
+        )?;
+
+        for _ in 0..0xFFFF {
+            // wait until sent
+            if w5500.is_interrupt_set(*socket, Interrupt::SendOk)? {
+                w5500.reset_interrupt(*socket, Interrupt::SendOk)?;
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn disconnect(&mut self) -> Result<(), E> {
+        let (w5500, TcpSocket(socket)) = self;
+        w5500.write_u8(
+            socket.at(SocketRegister::Command),
+            SocketCommand::Disconnect as u8,
+        );
+
+        while w5500.read_u8(socket.at(SocketRegister::Status))? & SocketStatus::FinWait as u8 > 0 {}
+        while w5500.read_u8(socket.at(SocketRegister::Status))? & SocketStatus::Closed as u8 > 0 {}
+
+        Ok(())
+    }
+
+    fn reconnect(&mut self) -> Result<(), E> {
+        if self.is_connected() {
+            return Ok(());
+        }
+
+        let (w5500, TcpSocket(socket)) = self;
+
+        let rtr_read = w5500.read_u16(socket.at(SocketRegister::RetryTimeRegister))?;
+        let rcr_read = w5500.read_u8(socket.at(SocketRegister::RetryCountRegister))?;
+
+        w5500.write_u16(socket.at(SocketRegister::RetryTimeRegister), 200);
+        w5500.write_u8(socket.at(SocketRegister::RetryCountRegister), 2);
+
+        let mut local_port: u16 = w5500.read_u16(socket.at(SocketRegister::LocalPort))?;
+        if local_port.overflowing_add(1).1 {
+            local_port = 40000;
+        } else {
+            local_port += 1;
+        }
+
+        w5500.write_u8(
+            socket.at(SocketRegister::Interrupt),
+            Interrupt::SendOk as u8,
+        );
+        w5500.write_u16(socket.at(SocketRegister::LocalPort), local_port)?;
+
+        w5500.write_to(
+            socket.at(SocketRegister::Mode),
+            &[
+                Protocol::TCP as u8,       // Socket Mode Register
+                SocketCommand::Open as u8, // Socket Command Register
+            ],
+        )?;
+        while w5500.read_u8(socket.at(SocketRegister::Status))? & SocketStatus::Closed as u8 > 0 {}
+        w5500.write_to(
+            socket.at(SocketRegister::Mode),
+            &[Protocol::TCP as u8, SocketCommand::Connect as u8],
+        )?;
+
+        while w5500.read_u8(socket.at(SocketRegister::Status))? & SocketStatus::Established as u8
+            == 0
+        {}
+
+        self.0
+            .write_u16(socket.at(SocketRegister::RetryTimeRegister), rtr_read);
+        self.0
+            .write_u8(socket.at(SocketRegister::RetryCountRegister), rcr_read);
+
+        Ok(())
+    }
+
+    fn is_connected(&mut self) -> bool {
+        let (w5500, TcpSocket(socket)) = self;
+        w5500
+            .read_u8(socket.at(SocketRegister::Status))
+            .unwrap_or_default()
+            & SocketStatus::Established as u8
+            > 0
     }
 }
 
 pub trait Udp<E> {
     fn receive(&mut self, target_buffer: &mut [u8]) -> Result<Option<(IpAddress, u16, usize)>, E>;
-    fn blocking_send(
-        &mut self,
-        host: &IpAddress,
-        host_port: u16,
-        data: &[u8],
-    ) -> Result<(), E>;
+    fn blocking_send(&mut self, host: &IpAddress, host_port: u16, data: &[u8]) -> Result<(), E>;
 }
 
 impl<E> Udp<E> for (&mut ActiveW5500<'_, '_, '_, E>, &UdpSocket) {
@@ -463,9 +658,6 @@ impl<E> Udp<E> for (&mut ActiveW5500<'_, '_, '_, E>, &UdpSocket) {
                 &mut destination[..data_length],
             )?;
 
-            // self.read_from(socket.register_at(0x00_0C), &mut ip.address)?;
-            // self.read_u16(socket.register_at(0x00_10))?;
-
             // reset
             w5500.write_u16(
                 socket.at(SocketRegister::RxReadPointer),
@@ -482,12 +674,7 @@ impl<E> Udp<E> for (&mut ActiveW5500<'_, '_, '_, E>, &UdpSocket) {
         }
     }
 
-    fn blocking_send(
-        &mut self,
-        host: &IpAddress,
-        host_port: u16,
-        data: &[u8],
-    ) -> Result<(), E> {
+    fn blocking_send(&mut self, host: &IpAddress, host_port: u16, data: &[u8]) -> Result<(), E> {
         let (w5500, UdpSocket(socket)) = self;
 
         {
@@ -561,7 +748,6 @@ impl<E> Udp<E> for (&mut ActiveW5500<'_, '_, '_, E>, &UdpSocket) {
     }
 }
 
-
 #[repr(u8)]
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum SocketRegister {
@@ -578,6 +764,8 @@ pub enum SocketRegister {
     TypeOfService = 0x0015,
     TimeToLive = 0x0016,
     // Reserved 0x0017 - 0x001D
+    RetryTimeRegister = 0x0019,
+    RetryCountRegister = 0x001B,
     ReceiveBuffer = 0x001E,
     TransmitBuffer = 0x001F,
     TxFreeSize = 0x0020,
@@ -622,6 +810,26 @@ pub enum SocketCommand {
     SendMac = 0x21,
     SendKeep = 0x22,
     Recv = 0x40,
+}
+
+#[repr(u8)]
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub enum SocketStatus {
+    Closed = 0x00,
+    Init = 0x13,
+    Listen = 0x14,
+    Established = 0x17,
+    CloseWait = 0x1C,
+    SockUdp = 0x22,
+    Macraw = 0x42,
+
+    // Temp status
+    SynSent = 0x15,
+    SynRecv = 0x16,
+    FinWait = 0x18,
+    Closing = 0x1A,
+    TimeWait = 0x1B,
+    LastAck = 0x1D,
 }
 
 #[derive(Copy, Clone, PartialEq, PartialOrd, Debug)]
