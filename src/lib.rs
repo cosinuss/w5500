@@ -12,6 +12,8 @@ use hal::spi::FullDuplex;
 
 use byteorder::BigEndian;
 use byteorder::ByteOrder;
+use core::convert::TryFrom;
+use core::str::FromStr;
 
 const COMMAND_READ: u8 = 0x00 << 2;
 const COMMAND_WRITE: u8 = 0x01 << 2;
@@ -31,6 +33,22 @@ impl IpAddress {
         IpAddress {
             address: [a0, a1, a2, a3],
         }
+    }
+}
+
+impl TryFrom<&str> for IpAddress {
+    type Error = ();
+    fn try_from(string: &str) -> Result<IpAddress, Self::Error> {
+        let mut address = [0u8; 4];
+        for (i, part) in string.split(".").enumerate() {
+            if i > 3 {
+                break;
+            }
+            address[i] = u8::from_str(part).map_err(|_| ())?;
+        }
+        Ok(IpAddress {
+            address
+        })
     }
 }
 
@@ -54,6 +72,22 @@ impl MacAddress {
         MacAddress {
             address: [a0, a1, a2, a3, a4, a5],
         }
+    }
+}
+
+impl TryFrom<&str> for MacAddress {
+    type Error = ();
+    fn try_from(string: &str) -> Result<MacAddress, Self::Error> {
+        let mut address = [0u8; 6];
+        for (i, part) in string.split(":").enumerate() {
+            if i > 5 {
+                break;
+            }
+            address[i] = u8::from_str_radix(part, 16).map_err(|_| ())?;
+        }
+        Ok(MacAddress {
+            address
+        })
     }
 }
 
