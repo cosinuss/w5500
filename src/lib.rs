@@ -7,7 +7,7 @@ extern crate embedded_hal as hal;
 #[macro_use(block)]
 extern crate nb;
 
-use hal::digital::OutputPin;
+use hal::digital::v2::OutputPin;
 use hal::spi::FullDuplex;
 
 use byteorder::BigEndian;
@@ -46,9 +46,7 @@ impl TryFrom<&str> for IpAddress {
             }
             address[i] = u8::from_str(part).map_err(|_| ())?;
         }
-        Ok(IpAddress {
-            address
-        })
+        Ok(IpAddress { address })
     }
 }
 
@@ -85,9 +83,7 @@ impl TryFrom<&str> for MacAddress {
             }
             address[i] = u8::from_str_radix(part, 16).map_err(|_| ())?;
         }
-        Ok(MacAddress {
-            address
-        })
+        Ok(MacAddress { address })
     }
 }
 
@@ -136,14 +132,14 @@ pub struct UninitializedSocket(Socket);
 pub struct TcpSocket(Socket);
 pub struct UdpSocket(Socket);
 
-pub struct W5500<'a> {
+pub struct W5500<'a, PinError> {
     local_port: u16,
-    chip_select: &'a mut OutputPin,
+    chip_select: &'a mut OutputPin<Error = PinError>,
     sockets: u8, // each bit represents whether the corresponding socket is available for take
 }
 
-impl<'b, 'a: 'b> W5500<'a> {
-    fn new(chip_select: &mut OutputPin) -> W5500 {
+impl<'b, 'a: 'b, PinError> W5500<'a, PinError> {
+    fn new(chip_select: &mut OutputPin<Error = PinError>) -> W5500<PinError> {
         W5500 {
             local_port: 40000,
             chip_select,
@@ -152,7 +148,7 @@ impl<'b, 'a: 'b> W5500<'a> {
     }
 
     pub fn with_initialisation<'c, E>(
-        chip_select: &'a mut OutputPin,
+        chip_select: &'a mut OutputPin<Error = PinError>,
         spi: &'c mut FullDuplex<u8, Error = E>,
         wol: OnWakeOnLan,
         ping: OnPingRequest,
@@ -183,14 +179,14 @@ impl<'b, 'a: 'b> W5500<'a> {
     pub fn activate<'c, E>(
         &'b mut self,
         spi: &'c mut FullDuplex<u8, Error = E>,
-    ) -> Result<ActiveW5500<'b, 'a, 'c, E>, E> {
+    ) -> Result<ActiveW5500<'b, 'a, 'c, E, PinError>, E> {
         Ok(ActiveW5500(self, spi))
     }
 }
 
-pub struct ActiveW5500<'a, 'b: 'a, 'c, E>(&'a mut W5500<'b>, &'c mut FullDuplex<u8, Error = E>);
+pub struct ActiveW5500<'a, 'b: 'a, 'c, E, PinError>(&'a mut W5500<'b, PinError>, &'c mut FullDuplex<u8, Error = E>);
 
-impl<E> ActiveW5500<'_, '_, '_, E> {
+impl<E, PinError> ActiveW5500<'_, '_, '_, E, PinError> {
     pub fn take_socket(&mut self, socket: Socket) -> Option<UninitializedSocket> {
         self.0.take_socket(socket)
     }
@@ -352,29 +348,31 @@ impl<E> ActiveW5500<'_, '_, '_, E> {
         Ok(())
     }
 
-    fn chip_select(&mut self) {
-        self.0.chip_select.set_low()
+    fn chip_select(&mut self) -> Result<(), PinError> {
+        self.0.chip_select.set_low()?;
+        Ok(())
     }
 
-    fn chip_deselect(&mut self) {
-        self.0.chip_select.set_high()
+    fn chip_deselect(&mut self) -> Result<(), PinError> {
+        self.0.chip_select.set_high()?;
+        Ok(())
     }
 }
-
 
 pub trait IntoTcpSocket<E> {
     fn try_into_tcp_server_socket(self, port: u16) -> Result<TcpSocket, E>;
     fn try_into_tcp_client_socket(self, ip: IpAddress, port: u16) -> Result<TcpSocket, E>;
 }
 
-impl<E> IntoTcpSocket<UninitializedSocket>
-    for (&mut ActiveW5500<'_, '_, '_, E>, UninitializedSocket)
+impl<E, PinError> IntoTcpSocket<UninitializedSocket>
+    for (&mut ActiveW5500<'_, '_, '_, E, PinError>, UninitializedSocket)
 {
     fn try_into_tcp_server_socket(self, port: u16) -> Result<TcpSocket, UninitializedSocket> {
         let socket = (self.1).0;
         (|| {
             self.0.reset_interrupt(socket, Interrupt::SendOk)?;
-            self.0.write_u16(socket.at(SocketRegister::LocalPort), (self.0).0.local_port)?;
+            self.0
+                .write_u16(socket.at(SocketRegister::LocalPort), (self.0).0.local_port)?;
             (self.0).0.local_port += 1;
             self.0.write_to(
                 socket.at(SocketRegister::Mode),
@@ -407,16 +405,25 @@ impl<E> IntoTcpSocket<UninitializedSocket>
         (|| {
             self.0.reset_interrupt(socket, Interrupt::SendOk)?;
 
-            let rtr_read = self.0.read_u16(socket.at(SocketRegister::RetryTimeRegister))?;
-            let rcr_read = self.0.read_u8(socket.at(SocketRegister::RetryCountRegister))?;
+            let rtr_read = self
+                .0
+                .read_u16(socket.at(SocketRegister::RetryTimeRegister))?;
+            let rcr_read = self
+                .0
+                .read_u8(socket.at(SocketRegister::RetryCountRegister))?;
 
-            self.0.write_u16(socket.at(SocketRegister::RetryTimeRegister), 200);
-            self.0.write_u8(socket.at(SocketRegister::RetryCountRegister), 3);
+            self.0
+                .write_u16(socket.at(SocketRegister::RetryTimeRegister), 200);
+            self.0
+                .write_u8(socket.at(SocketRegister::RetryCountRegister), 3);
 
-            self.0.write_u16(socket.at(SocketRegister::LocalPort), (self.0).0.local_port)?;
+            self.0
+                .write_u16(socket.at(SocketRegister::LocalPort), (self.0).0.local_port)?;
             (self.0).0.local_port += 1;
-            self.0.write_u16(socket.at(SocketRegister::DestinationPort), port)?;
-            self.0.write_to(socket.at(SocketRegister::DestinationIp), &ip.address)?;
+            self.0
+                .write_u16(socket.at(SocketRegister::DestinationPort), port)?;
+            self.0
+                .write_to(socket.at(SocketRegister::DestinationIp), &ip.address)?;
             self.0.write_to(
                 socket.at(SocketRegister::Mode),
                 &[
@@ -436,8 +443,10 @@ impl<E> IntoTcpSocket<UninitializedSocket>
                 == 0
             {}
 
-            self.0.write_u16(socket.at(SocketRegister::RetryTimeRegister), rtr_read);
-            self.0.write_u8(socket.at(SocketRegister::RetryCountRegister), rcr_read);
+            self.0
+                .write_u16(socket.at(SocketRegister::RetryTimeRegister), rtr_read);
+            self.0
+                .write_u8(socket.at(SocketRegister::RetryCountRegister), rcr_read);
 
             Ok(TcpSocket(socket))
         })()
@@ -455,8 +464,8 @@ pub trait IntoUdpSocket<E> {
         Self: Sized;
 }
 
-impl<E> IntoUdpSocket<UninitializedSocket>
-    for (&mut ActiveW5500<'_, '_, '_, E>, UninitializedSocket)
+impl<E, PinError> IntoUdpSocket<UninitializedSocket>
+    for (&mut ActiveW5500<'_, '_, '_, E, PinError>, UninitializedSocket)
 {
     fn try_into_udp_server_socket(self, port: u16) -> Result<UdpSocket, UninitializedSocket> {
         let socket = (self.1).0;
@@ -502,7 +511,7 @@ pub trait Tcp<E> {
     fn is_connected(&mut self) -> bool;
 }
 
-impl<E> Tcp<E> for (&mut ActiveW5500<'_, '_, '_, E>, &TcpSocket) {
+impl<E, PinError> Tcp<E> for (&mut ActiveW5500<'_, '_, '_, E, PinError>, &TcpSocket) {
     fn receive(&mut self, destination: &mut [u8]) -> Result<Option<(IpAddress, u16, usize)>, E> {
         let (w5500, TcpSocket(socket)) = self;
 
@@ -659,7 +668,7 @@ pub trait Udp<E> {
     fn blocking_send(&mut self, host: &IpAddress, host_port: u16, data: &[u8]) -> Result<(), E>;
 }
 
-impl<E> Udp<E> for (&mut ActiveW5500<'_, '_, '_, E>, &UdpSocket) {
+impl<E, PinError> Udp<E> for (&mut ActiveW5500<'_, '_, '_, E, PinError>, &UdpSocket) {
     fn receive(&mut self, destination: &mut [u8]) -> Result<Option<(IpAddress, u16, usize)>, E> {
         let (w5500, UdpSocket(socket)) = self;
 
