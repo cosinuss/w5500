@@ -8,8 +8,12 @@ keywords = ["embedded", "w5500", "iot", "arm", "embedded-hal-driver"]
 categories = ["embedded", "hardware-support", "no-std", "network-programming"]
 license = "MIT OR Apache-2.0"
 readme = "README.md"
+edition = "2018"
 
 [dependencies]
 byteorder = { version = "1.2.1", default-features = false }
 embedded-hal = "0.2.1"
 nb = "0.1.1"
+futures = { version = "0.3.5", default-features = false }
+async-trait = "0.1.31"
+
