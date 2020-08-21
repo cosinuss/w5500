@@ -39,6 +39,26 @@ const FIXED_DATA_LENGTH_1_BYTE: u8 = 0b_01;
 const FIXED_DATA_LENGTH_2_BYTES: u8 = 0b_10;
 const FIXED_DATA_LENGTH_4_BYTES: u8 = 0b_11;
 
+pub async fn yield_now() {
+    YieldNow(false).await
+}
+
+struct YieldNow(bool);
+
+impl Future for YieldNow {
+    type Output = ();
+
+    fn poll(mut self: core::pin::Pin<&mut Self>, cx: &mut core::task::Context<'_>) -> Poll<Self::Output> {
+        if !self.0 {
+            self.0 = true;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        } else {
+            Poll::Ready(())
+        }
+    }
+}
+
 #[derive(Copy, Clone, PartialOrd, PartialEq, Default, Debug)]
 pub struct IpAddress {
     pub address: [u8; 4],
@@ -452,7 +472,7 @@ where
             while self.0.read_u8(socket.at(SocketRegister::Status)).await?
                 & SocketStatus::Closed as u8
                 > 0
-            {}
+            { yield_now().await; }
             self.0.write_to(
                 socket.at(SocketRegister::Mode),
                 &[Protocol::TCP as u8, SocketCommand::Listen as u8],
@@ -460,7 +480,7 @@ where
             while self.0.read_u8(socket.at(SocketRegister::Status)).await?
                 & SocketStatus::Listen as u8
                 == 0
-            {}
+            { yield_now().await; }
             Ok(TcpSocket(socket)) as Result<_, SPI::Error>
         }
         .map_err(move |_: SPI::Error| UninitializedSocket(socket))
@@ -509,7 +529,7 @@ where
             while self.0.read_u8(socket.at(SocketRegister::Status)).await?
                 & SocketStatus::Closed as u8
                 > 0
-            {}
+            { yield_now().await; }
             self.0
                 .write_to(
                     socket.at(SocketRegister::Mode),
@@ -519,7 +539,7 @@ where
             while self.0.read_u8(socket.at(SocketRegister::Status)).await?
                 & SocketStatus::Established as u8
                 == 0
-            {}
+            { yield_now().await; }
 
             self.0
                 .write_u16(socket.at(SocketRegister::RetryTimeRegister), rtr_read)
@@ -734,6 +754,8 @@ where
                     w5500.reset_interrupt(*socket, Interrupt::SendOk).await?;
                     break;
                 }
+
+                yield_now().await;
             }
 
             Ok(())
@@ -751,11 +773,11 @@ where
             while w5500.read_u8(socket.at(SocketRegister::Status)).await?
                 & SocketStatus::FinWait as u8
                 > 0
-            {}
+            { yield_now().await; }
             while w5500.read_u8(socket.at(SocketRegister::Status)).await?
                 & SocketStatus::Closed as u8
                 > 0
-            {}
+            { yield_now().await; }
 
             Ok(())
         }
@@ -806,7 +828,7 @@ where
             while w5500.read_u8(socket.at(SocketRegister::Status)).await?
                 & SocketStatus::Closed as u8
                 > 0
-            {}
+            { yield_now().await; }
             w5500
                 .write_to(
                     socket.at(SocketRegister::Mode),
@@ -817,7 +839,7 @@ where
             while w5500.read_u8(socket.at(SocketRegister::Status)).await?
                 & SocketStatus::Established as u8
                 == 0
-            {}
+            { yield_now().await; }
 
             self.0
                 .write_u16(socket.at(SocketRegister::RetryTimeRegister), rtr_read);
@@ -1002,6 +1024,8 @@ where
                     w5500.reset_interrupt(*socket, Interrupt::SendOk).await?;
                     break;
                 }
+
+                yield_now().await;
             }
             // restore listen state
             /*
