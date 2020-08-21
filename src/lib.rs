@@ -76,7 +76,7 @@ impl TryFrom<&str> for IpAddress {
     type Error = ();
     fn try_from(string: &str) -> Result<IpAddress, Self::Error> {
         let mut address = [0u8; 4];
-        for (i, part) in string.split(".").enumerate() {
+        for (i, part) in string.split('.').enumerate() {
             if i > 3 {
                 break;
             }
@@ -113,7 +113,7 @@ impl TryFrom<&str> for MacAddress {
     type Error = ();
     fn try_from(string: &str) -> Result<MacAddress, Self::Error> {
         let mut address = [0u8; 6];
-        for (i, part) in string.split(":").enumerate() {
+        for (i, part) in string.split(':').enumerate() {
             if i > 5 {
                 break;
             }
@@ -297,6 +297,8 @@ impl<SPI: AsyncTransfer, PinError: Send> ActiveW5500<'_, '_, '_, SPI, PinError> 
         Ok(ip)
     }
 
+    /// # Safety
+    ///
     /// This is unsafe because it cannot set taken sockets back to be uninitialized
     /// It assumes, none of the old sockets will used anymore. Otherwise that socket
     /// will have undefined behavior.
@@ -631,9 +633,9 @@ pub trait Tcp<E> {
 
     fn receive<'a>(&'a mut self, target_buffer: &mut [u8]) -> Self::ReceiveFut<'a>;
     fn blocking_send<'a>(&'a mut self, data: &'a [u8]) -> Self::BlockingSendFut<'a>;
-    fn disconnect<'a>(&'a mut self) -> Self::DisconnectFut<'a>;
-    fn reconnect<'a>(&'a mut self) -> Self::ReconnectFut<'a>;
-    fn is_connected<'a>(&'a mut self) -> Self::IsConnectedFut<'a>;
+    fn disconnect(&mut self) -> Self::DisconnectFut<'_>;
+    fn reconnect(&mut self) -> Self::ReconnectFut<'_>;
+    fn is_connected(&mut self) -> Self::IsConnectedFut<'_>;
 }
 
 impl<SPI: AsyncTransfer + Send, PinError: Send> Tcp<SPI::Error>
@@ -762,7 +764,7 @@ where
         }
     }
 
-    fn disconnect<'a>(&'a mut self) -> Self::DisconnectFut<'a> {
+    fn disconnect(&mut self) -> Self::DisconnectFut<'_> {
         let (w5500, TcpSocket(socket)) = self;
         async move {
             w5500.write_u8(
@@ -783,7 +785,7 @@ where
         }
     }
 
-    fn reconnect<'a>(&'a mut self) -> Self::ReconnectFut<'a> {
+    fn reconnect(&mut self) -> Self::ReconnectFut<'_> {
         async move {
             if self.is_connected().await? {
                 return Ok(());
@@ -850,7 +852,7 @@ where
         }
     }
 
-    fn is_connected<'a>(&'a mut self) -> Self::IsConnectedFut<'a> {
+    fn is_connected(&mut self) -> Self::IsConnectedFut<'_> {
         async move {
             let (w5500, TcpSocket(socket)) = self;
             Ok(w5500
