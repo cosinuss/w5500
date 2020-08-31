@@ -458,10 +458,11 @@ where
         let socket = (self.1).0;
         async move {
             self.0.reset_interrupt(socket, Interrupt::SendOk).await?;
+
             self.0
-                .write_u16(socket.at(SocketRegister::LocalPort), (self.0).0.local_port)
+                .write_u16(socket.at(SocketRegister::LocalPort), port)
                 .await?;
-            (self.0).0.local_port += 1;
+
             self.0
                 .write_to(
                     socket.at(SocketRegister::Mode),
