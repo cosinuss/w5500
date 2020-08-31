@@ -6,13 +6,10 @@
 #![allow(incomplete_features)]
 
 extern crate alloc;
-extern crate byteorder;
-extern crate embedded_hal as hal;
-extern crate nb;
 
 use async_embedded_traits::spi::AsyncTransfer;
 use core::future::Future;
-use hal::digital::v2::OutputPin;
+use embedded_hal::digital::v2::OutputPin;
 
 use byteorder::BigEndian;
 use byteorder::ByteOrder;
