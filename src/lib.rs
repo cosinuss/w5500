@@ -690,6 +690,14 @@ where
                 let port = w5500
                     .read_u16(socket.at(SocketRegister::DestinationPort))
                     .await?;
+                let data_length = destination
+                    .len()
+                    .min(receive_size as usize);
+
+                w5500.read_from(
+                    socket.rx_register_at(read_pointer),
+                    &mut destination[..data_length],
+                ).await?;
 
                 // reset
                 w5500
