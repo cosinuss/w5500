@@ -241,7 +241,7 @@ impl<SPI: AsyncTransfer, PinError: Send> ActiveW5500<'_, '_, '_, SPI, PinError> 
             value |= 1 << 1;
         }
 
-        self.write_to(Register::CommonRegister(0x00_00_u16), &[value])
+        self.write_u8(Register::CommonRegister(0x00_00_u16), value)
             .await
     }
 
@@ -277,11 +277,9 @@ impl<SPI: AsyncTransfer, PinError: Send> ActiveW5500<'_, '_, '_, SPI, PinError> 
     /// It assumes, none of the old sockets will used anymore. Otherwise that socket
     /// will have undefined behavior.
     pub async unsafe fn reset(&mut self) -> Result<(), SPI::Error> {
-        self.write_to(
+        self.write_u8(
             Register::CommonRegister(0x00_00_u16),
-            &[
-                0b1000_0000, // Mode Register (force reset)
-            ],
+            0b1000_0000, // Mode Register (force reset)
         )
         .await?;
         self.0.sockets = 0xFF;
@@ -311,8 +309,12 @@ impl<SPI: AsyncTransfer, PinError: Send> ActiveW5500<'_, '_, '_, SPI, PinError> 
         socket: Socket,
         interrupt: Interrupt,
     ) -> Result<(), SPI::Error> {
-        self.write_to(socket.at(SocketRegister::Interrupt), &[interrupt as u8])
+        self.write_u8(socket.at(SocketRegister::Interrupt), interrupt as u8)
             .await
+    }
+
+    pub async fn socket_status(&mut self, socket: &Socket) -> Result<SocketStatus, SPI::Error> {
+        self.read_u8(socket.at(SocketRegister::Status)).await.map(SocketStatus::from_u8)
     }
 
     async fn read_u8(&mut self, register: Register) -> Result<u8, SPI::Error> {
@@ -429,101 +431,87 @@ where
     type TcpServerFut = impl Future<Output = Result<TcpSocket, UninitializedSocket>>;
     type TcpClientFut = impl Future<Output = Result<TcpSocket, UninitializedSocket>>;
     fn try_into_tcp_server_socket(self, port: u16) -> Self::TcpServerFut {
-        let socket = (self.1).0;
+        let (w5500, UninitializedSocket(socket)) = self;
+
         async move {
-            self.0.reset_interrupt(socket, Interrupt::SendOk).await?;
+            w5500.reset_interrupt(socket, Interrupt::SendOk).await?;
 
-            self.0
-                .write_u16(socket.at(SocketRegister::LocalPort), port)
-                .await?;
+            // set the port to use
+            w5500.write_u16(socket.at(SocketRegister::LocalPort), port).await?;
 
-            self.0
-                .write_to(
-                    socket.at(SocketRegister::Mode),
-                    &[
-                        Protocol::TCP as u8,       // Socket Mode Register
-                        SocketCommand::Open as u8, // Socket Command Register
-                    ],
-                )
-                .await?;
-            while self.0.read_u8(socket.at(SocketRegister::Status)).await?
-                & SocketStatus::Closed as u8
-                > 0
-            { yield_now().await; }
-            self.0.write_to(
+            // open the TCP socket
+            // the Command register directly follows the Mode register so we can write to both at once
+            w5500.write_to(
                 socket.at(SocketRegister::Mode),
-                &[Protocol::TCP as u8, SocketCommand::Listen as u8],
+                &[
+                    Protocol::TCP as u8,
+                    SocketCommand::Open as u8,
+                ],
             ).await?;
-            while self.0.read_u8(socket.at(SocketRegister::Status)).await?
-                & SocketStatus::Listen as u8
-                == 0
-            { yield_now().await; }
+
+            // wait for the socket to be ready
+            while w5500.socket_status(&socket).await? != SocketStatus::Init {
+                yield_now().await;
+            }
+
+            // start listening
+            w5500.write_u8(socket.at(SocketRegister::Command), SocketCommand::Listen as u8).await?;
+
+            // wait for the socket to start listening
+            while w5500.socket_status(&socket).await? != SocketStatus::Listen {
+                yield_now().await;
+            }
+
             Ok(TcpSocket(socket)) as Result<_, SPI::Error>
         }
         .map_err(move |_: SPI::Error| UninitializedSocket(socket))
     }
 
     fn try_into_tcp_client_socket(self, ip: IpAddress, port: u16) -> Self::TcpClientFut {
-        let socket = (self.1).0;
+        let (w5500, UninitializedSocket(socket)) = self;
+
         async move {
-            self.0.reset_interrupt(socket, Interrupt::SendOk).await?;
+            w5500.reset_interrupt(socket, Interrupt::SendOk).await?;
 
-            let rtr_read = self
-                .0
-                .read_u16(socket.at(SocketRegister::RetryTimeRegister))
-                .await?;
-            let rcr_read = self
-                .0
-                .read_u8(socket.at(SocketRegister::RetryCountRegister))
-                .await?;
+            let rtr_read = w5500.read_u16(socket.at(SocketRegister::RetryTimeRegister)).await?;
+            let rcr_read = w5500.read_u8(socket.at(SocketRegister::RetryCountRegister)).await?;
 
-            self.0
-                .write_u16(socket.at(SocketRegister::RetryTimeRegister), 200)
-                .await?;
-            self.0
-                .write_u8(socket.at(SocketRegister::RetryCountRegister), 3)
-                .await?;
+            w5500.write_u16(socket.at(SocketRegister::RetryTimeRegister), 200).await?;
+            w5500.write_u8(socket.at(SocketRegister::RetryCountRegister), 3).await?;
 
-            self.0
-                .write_u16(socket.at(SocketRegister::LocalPort), (self.0).0.local_port)
-                .await?;
-            (self.0).0.local_port += 1;
-            self.0
-                .write_u16(socket.at(SocketRegister::DestinationPort), port)
-                .await?;
-            self.0
-                .write_to(socket.at(SocketRegister::DestinationIp), &ip.address)
-                .await?;
-            self.0
-                .write_to(
-                    socket.at(SocketRegister::Mode),
-                    &[
-                        Protocol::TCP as u8,       // Socket Mode Register
-                        SocketCommand::Open as u8, // Socket Command Register
-                    ],
-                )
-                .await?;
-            while self.0.read_u8(socket.at(SocketRegister::Status)).await?
-                & SocketStatus::Closed as u8
-                > 0
-            { yield_now().await; }
-            self.0
-                .write_to(
-                    socket.at(SocketRegister::Mode),
-                    &[Protocol::TCP as u8, SocketCommand::Connect as u8],
-                )
-                .await?;
-            while self.0.read_u8(socket.at(SocketRegister::Status)).await?
-                & SocketStatus::Established as u8
-                == 0
-            { yield_now().await; }
+            // set local port automatically, and increment it for next use
+            w5500.write_u16(socket.at(SocketRegister::LocalPort), w5500.0.local_port).await?;
+            w5500.0.local_port += 1;
 
-            self.0
-                .write_u16(socket.at(SocketRegister::RetryTimeRegister), rtr_read)
-                .await?;
-            self.0
-                .write_u8(socket.at(SocketRegister::RetryCountRegister), rcr_read)
-                .await?;
+            // set remote addr to connect to
+            w5500.write_u16(socket.at(SocketRegister::DestinationPort), port).await?;
+            w5500.write_to(socket.at(SocketRegister::DestinationIp), &ip.address).await?;
+
+            // open the TCP socket
+            // the Command register directly follows the Mode register so we can write to both at once
+            w5500.write_to(
+                socket.at(SocketRegister::Mode),
+                &[
+                    Protocol::TCP as u8,       // Socket Mode Register
+                    SocketCommand::Open as u8, // Socket Command Register
+                ],
+            ).await?;
+
+            // wait for the socket to be ready
+            while w5500.socket_status(&socket).await? != SocketStatus::Init {
+                yield_now().await;
+            }
+
+            // issue the connect command
+            w5500.write_u8(socket.at(SocketRegister::Command), SocketCommand::Connect as u8).await?;
+
+            // wait for the connection to be established
+            while w5500.socket_status(&socket).await? != SocketStatus::Established {
+                yield_now().await;
+            }
+
+            w5500.write_u16(socket.at(SocketRegister::RetryTimeRegister), rtr_read).await?;
+            w5500.write_u8(socket.at(SocketRegister::RetryCountRegister), rcr_read).await?;
 
             Ok(TcpSocket(socket)) as Result<_, SPI::Error>
         }
@@ -557,41 +545,42 @@ where
     type UdpClientFut = impl Future<Output = Result<UdpSocket, UninitializedSocket>>;
 
     fn try_into_udp_server_socket(self, port: u16) -> Self::UdpServerFut {
-        let socket = (self.1).0;
-        async move {
-            self.0.reset_interrupt(socket, Interrupt::SendOk).await?;
+        let (w5500, UninitializedSocket(socket)) = self;
 
-            self.0
-                .write_u16(socket.at(SocketRegister::LocalPort), port)
-                .await?;
-            self.0
-                .write_to(
-                    socket.at(SocketRegister::Mode),
-                    &[
-                        Protocol::UDP as u8,       // Socket Mode Register
-                        SocketCommand::Open as u8, // Socket Command Register
-                    ],
-                )
-                .await?;
+        async move {
+            w5500.reset_interrupt(socket, Interrupt::SendOk).await?;
+
+            w5500.write_u16(socket.at(SocketRegister::LocalPort), port).await?;
+
+            w5500.write_to(
+                socket.at(SocketRegister::Mode),
+                &[
+                    Protocol::UDP as u8,       // Socket Mode Register
+                    SocketCommand::Open as u8, // Socket Command Register
+                ],
+            ).await?;
+
             Ok(UdpSocket(socket))
         }
         .map_err(move |_: SPI::Error| UninitializedSocket(socket))
     }
 
     fn try_into_udp_client_socket(self, port: u16) -> Self::UdpClientFut {
-        let socket = (self.1).0;
-        async move {
-            self.0.reset_interrupt(socket, Interrupt::SendOk).await?;
+        let (w5500, UninitializedSocket(socket)) = self;
 
-            self.0
-                .write_u16(socket.at(SocketRegister::DestinationPort), port)
-                .await?;
-            self.0
-                .write_to(
-                    socket.at(SocketRegister::Mode),
-                    &[Protocol::UDP as u8, SocketCommand::Open as u8],
-                )
-                .await?;
+        async move {
+            w5500.reset_interrupt(socket, Interrupt::SendOk).await?;
+
+            w5500.write_u16(socket.at(SocketRegister::DestinationPort), port).await?;
+
+            w5500.write_to(
+                socket.at(SocketRegister::Mode),
+                &[
+                    Protocol::UDP as u8,
+                    SocketCommand::Open as u8
+                ],
+            ).await?;
+
             Ok(UdpSocket(socket))
         }
         .map_err(move |_: SPI::Error| UninitializedSocket(socket))
@@ -625,49 +614,37 @@ where
     type DisconnectFut<'a> = impl Future<Output = Result<(), Self::Error<'a>>>;
     type ReconnectFut<'a> = impl Future<Output = Result<(), Self::Error<'a>>>;
     type IsConnectedFut<'a> = impl Future<Output = Result<bool, Self::Error<'a>>>;
-    fn receive<'a>(&'a mut self, destination: &'a mut [u8]) -> Self::ReceiveFut<'a> {
-        async move {
-            let (w5500, TcpSocket(socket)) = self;
 
-            if w5500.read_u8(socket.at(SocketRegister::Status)).await? & 0x17 == 0 {
+    fn receive<'a>(&'a mut self, destination: &'a mut [u8]) -> Self::ReceiveFut<'a> {
+        let (w5500, TcpSocket(socket)) = self;
+
+        async move {
+            if w5500.socket_status(socket).await? != SocketStatus::Established {
                 return Ok(None);
             }
 
-            if w5500
-                .read_u8(socket.at(SocketRegister::InterruptMask))
-                .await?
-                & 0x04
-                == 0
+            if w5500.read_u8(socket.at(SocketRegister::InterruptMask)).await?
+                & 1 << 2 == 0 // if !RECV
             {
                 return Ok(None);
             }
 
+            // wait until the amount of bytes we received stops growing (we're done receiving)
             let receive_size = loop {
-                let s0 = w5500
-                    .read_u16(socket.at(SocketRegister::RxReceivedSize))
-                    .await?;
-                let s1 = w5500
-                    .read_u16(socket.at(SocketRegister::RxReceivedSize))
-                    .await?;
+                let s0 = w5500.read_u16(socket.at(SocketRegister::RxReceivedSize)).await?;
+                let s1 = w5500.read_u16(socket.at(SocketRegister::RxReceivedSize)).await?;
                 if s0 == s1 {
                     break s0 as u16;
                 }
             };
 
             if receive_size > 0 {
-                let read_pointer = w5500
-                    .read_u16(socket.at(SocketRegister::RxReadPointer))
-                    .await?;
+                let read_pointer = w5500.read_u16(socket.at(SocketRegister::RxReadPointer)).await?;
 
-                let ip = w5500
-                    .read_ip(socket.at(SocketRegister::DestinationIp))
-                    .await?;
-                let port = w5500
-                    .read_u16(socket.at(SocketRegister::DestinationPort))
-                    .await?;
-                let data_length = destination
-                    .len()
-                    .min(receive_size as usize);
+                let ip = w5500.read_ip(socket.at(SocketRegister::DestinationIp)).await?;
+                let port = w5500.read_u16(socket.at(SocketRegister::DestinationPort)).await?;
+
+                let data_length = destination.len().min(receive_size as usize);
 
                 w5500.read_from(
                     socket.rx_register_at(read_pointer),
@@ -675,18 +652,15 @@ where
                 ).await?;
 
                 // reset
-                w5500
-                    .write_u16(
-                        socket.at(SocketRegister::RxReadPointer),
-                        read_pointer.overflowing_add(receive_size).0 as u16,
-                    )
-                    .await?;
-                w5500
-                    .write_u8(
-                        socket.at(SocketRegister::Command),
-                        SocketCommand::Recv as u8,
-                    )
-                    .await?;
+                w5500.write_u16(
+                    socket.at(SocketRegister::RxReadPointer),
+                    read_pointer.overflowing_add(receive_size).0 as u16,
+                ).await?;
+
+                w5500.write_u8(
+                    socket.at(SocketRegister::Command),
+                    SocketCommand::Recv as u8,
+                ).await?;
 
                 Ok(Some((ip, port, receive_size as usize)))
             } else {
@@ -710,30 +684,23 @@ where
                 .read_u16(socket.at(SocketRegister::TxReadPointer))
                 .await?;
 
-            w5500
-                .write_to(
-                    socket.tx_register_at(rx_read_pointer),
-                    &data[..data_length as usize],
-                )
-                .await?;
+            w5500.write_to(
+                socket.tx_register_at(rx_read_pointer),
+                &data[..data_length as usize],
+            ).await?;
 
             // reset
-            let tx_write_pointer = w5500
-                .read_u16(socket.at(SocketRegister::TxWritePointer))
-                .await?;
-            w5500
-                .write_u16(
-                    socket.at(SocketRegister::TxWritePointer),
-                    tx_write_pointer.overflowing_add(data_length as u16).0,
-                )
-                .await?;
+            let tx_write_pointer = w5500.read_u16(socket.at(SocketRegister::TxWritePointer)).await?;
 
-            w5500
-                .write_to(
-                    socket.at(SocketRegister::Command),
-                    &[SocketCommand::Send as u8],
-                )
-                .await?;
+            w5500.write_u16(
+                socket.at(SocketRegister::TxWritePointer),
+                tx_write_pointer.overflowing_add(data_length as u16).0,
+            ).await?;
+
+            w5500.write_u8(
+                socket.at(SocketRegister::Command),
+                SocketCommand::Send as u8,
+            ).await?;
 
             for _ in 0..0xFFFF {
                 // wait until sent
@@ -751,20 +718,20 @@ where
 
     fn disconnect(&mut self) -> Self::DisconnectFut<'_> {
         let (w5500, TcpSocket(socket)) = self;
+
         async move {
             w5500.write_u8(
                 socket.at(SocketRegister::Command),
                 SocketCommand::Disconnect as u8,
             ).await?;
 
-            while w5500.read_u8(socket.at(SocketRegister::Status)).await?
-                & SocketStatus::FinWait as u8
-                > 0
-            { yield_now().await; }
-            while w5500.read_u8(socket.at(SocketRegister::Status)).await?
-                & SocketStatus::Closed as u8
-                > 0
-            { yield_now().await; }
+            while w5500.socket_status(socket).await? == SocketStatus::FinWait {
+                yield_now().await;
+            }
+
+            while w5500.socket_status(socket).await? == SocketStatus::Closed {
+                yield_now().await;
+            }
 
             Ok(())
         }
@@ -772,18 +739,15 @@ where
 
     fn reconnect(&mut self) -> Self::ReconnectFut<'_> {
         async move {
+            // TODO: is this really what reconnect() should be doing?
             if self.is_connected().await? {
                 return Ok(());
             }
 
             let (w5500, TcpSocket(socket)) = self;
 
-            let rtr_read = w5500
-                .read_u16(socket.at(SocketRegister::RetryTimeRegister))
-                .await?;
-            let rcr_read = w5500
-                .read_u8(socket.at(SocketRegister::RetryCountRegister))
-                .await?;
+            let rtr_read = w5500.read_u16(socket.at(SocketRegister::RetryTimeRegister)).await?;
+            let rcr_read = w5500.read_u8(socket.at(SocketRegister::RetryCountRegister)).await?;
 
             w5500.write_u16(socket.at(SocketRegister::RetryTimeRegister), 200).await?;
             w5500.write_u8(socket.at(SocketRegister::RetryCountRegister), 2).await?;
@@ -795,43 +759,32 @@ where
                 local_port += 1;
             }
 
-            w5500.write_u8(
-                socket.at(SocketRegister::Interrupt),
-                Interrupt::SendOk as u8,
+            w5500.write_u8(socket.at(SocketRegister::Interrupt), Interrupt::SendOk as u8).await?;
+            w5500.write_u16(socket.at(SocketRegister::LocalPort), local_port).await?;
+
+            w5500.write_to(
+                socket.at(SocketRegister::Mode),
+                &[
+                    Protocol::TCP as u8,       // Socket Mode Register
+                    SocketCommand::Open as u8, // Socket Command Register
+                ],
             ).await?;
-            w5500
-                .write_u16(socket.at(SocketRegister::LocalPort), local_port)
-                .await?;
 
-            w5500
-                .write_to(
-                    socket.at(SocketRegister::Mode),
-                    &[
-                        Protocol::TCP as u8,       // Socket Mode Register
-                        SocketCommand::Open as u8, // Socket Command Register
-                    ],
-                )
-                .await?;
-            while w5500.read_u8(socket.at(SocketRegister::Status)).await?
-                & SocketStatus::Closed as u8
-                > 0
-            { yield_now().await; }
-            w5500
-                .write_to(
-                    socket.at(SocketRegister::Mode),
-                    &[Protocol::TCP as u8, SocketCommand::Connect as u8],
-                )
-                .await?;
+            while w5500.socket_status(socket).await? != SocketStatus::Init {
+                yield_now().await;
+            }
 
-            while w5500.read_u8(socket.at(SocketRegister::Status)).await?
-                & SocketStatus::Established as u8
-                == 0
-            { yield_now().await; }
+            w5500.write_to(
+                socket.at(SocketRegister::Mode),
+                &[ Protocol::TCP as u8, SocketCommand::Connect as u8 ],
+            ).await?;
 
-            self.0
-                .write_u16(socket.at(SocketRegister::RetryTimeRegister), rtr_read).await?;
-            self.0
-                .write_u8(socket.at(SocketRegister::RetryCountRegister), rcr_read).await?;
+            while w5500.socket_status(socket).await? != SocketStatus::Established {
+                yield_now().await;
+            }
+
+            w5500.write_u16(socket.at(SocketRegister::RetryTimeRegister), rtr_read).await?;
+            w5500.write_u8(socket.at(SocketRegister::RetryCountRegister), rcr_read).await?;
 
             Ok(())
         }
@@ -840,12 +793,7 @@ where
     fn is_connected(&mut self) -> Self::IsConnectedFut<'_> {
         async move {
             let (w5500, TcpSocket(socket)) = self;
-            Ok(w5500
-                .read_u8(socket.at(SocketRegister::Status))
-                .await
-                .unwrap_or_default()
-                & SocketStatus::Established as u8
-                > 0)
+            Ok(w5500.socket_status(socket).await? == SocketStatus::Established)
         }
     }
 }
@@ -854,6 +802,7 @@ pub trait Udp<E> {
     type Error<'a>;
     type ReceiveFut<'a>;
     type BlockingSendFut<'a>;
+
     fn receive<'a>(&'a mut self, target_buffer: &'a mut [u8]) -> Self::ReceiveFut<'a>;
     fn blocking_send<'a>(
         &'a mut self,
@@ -873,68 +822,55 @@ where
     type ReceiveFut<'a> =
         impl Future<Output = Result<Option<(IpAddress, u16, usize)>, Self::Error<'a>>>;
     type BlockingSendFut<'a> = impl Future<Output = Result<(), Self::Error<'a>>>;
+
     fn receive<'a>(&'a mut self, destination: &'a mut [u8]) -> Self::ReceiveFut<'a> {
         let (w5500, UdpSocket(socket)) = self;
+
         async move {
-            if w5500
-                .read_u8(socket.at(SocketRegister::InterruptMask))
-                .await?
-                & 0x04
-                == 0
+            if w5500.read_u8(socket.at(SocketRegister::InterruptMask)).await?
+                & 1 << 2 == 0 // if !RECV
             {
                 return Ok(None);
             }
 
+            // wait until the amount of bytes we received stops growing (we're done receiving)
             let receive_size = loop {
-                let s0 = w5500
-                    .read_u16(socket.at(SocketRegister::RxReceivedSize))
-                    .await?;
-                let s1 = w5500
-                    .read_u16(socket.at(SocketRegister::RxReceivedSize))
-                    .await?;
+                let s0 = w5500.read_u16(socket.at(SocketRegister::RxReceivedSize)).await?;
+                let s1 = w5500.read_u16(socket.at(SocketRegister::RxReceivedSize)).await?;
                 if s0 == s1 {
                     break s0 as usize;
                 }
             };
+
             if receive_size >= 8 {
-                let read_pointer = w5500
-                    .read_u16(socket.at(SocketRegister::RxReadPointer))
-                    .await?;
+                let read_pointer = w5500.read_u16(socket.at(SocketRegister::RxReadPointer)).await?;
 
                 // |<-- read_pointer                                read_pointer + received_size -->|
                 // |Destination IP Address | Destination Port | Byte Size of DATA | Actual DATA ... |
                 // |   --- 4 Bytes ---     |  --- 2 Bytes --- |  --- 2 Bytes ---  |      ....       |
 
                 let ip = w5500.read_ip(socket.rx_register_at(read_pointer)).await?;
-                let port = w5500
-                    .read_u16(socket.rx_register_at(read_pointer + 4))
-                    .await?;
+                let port = w5500.read_u16(socket.rx_register_at(read_pointer + 4)).await?;
+
                 let data_length = destination.len().min(
-                    w5500
-                        .read_u16(socket.rx_register_at(read_pointer + 6))
-                        .await? as usize,
+                    w5500.read_u16(socket.rx_register_at(read_pointer + 6)).await? as usize
                 );
 
-                w5500
-                    .read_from(
-                        socket.rx_register_at(read_pointer + 8),
-                        &mut destination[..data_length],
-                    )
-                    .await?;
+                w5500.read_from(
+                    socket.rx_register_at(read_pointer + 8),
+                    &mut destination[..data_length],
+                ).await?;
 
                 // reset
-                w5500
-                    .write_u16(
-                        socket.at(SocketRegister::RxReadPointer),
-                        read_pointer + receive_size as u16,
-                    )
-                    .await?;
-                w5500
-                    .write_u8(
-                        socket.at(SocketRegister::Command),
-                        SocketCommand::Recv as u8,
-                    )
-                    .await?;
+                w5500.write_u16(
+                    socket.at(SocketRegister::RxReadPointer),
+                    read_pointer + receive_size as u16,
+                ).await?;
+
+                w5500.write_u8(
+                    socket.at(SocketRegister::Command),
+                    SocketCommand::Recv as u8,
+                ).await?;
 
                 Ok(Some((ip, port, data_length)))
             } else {
@@ -991,19 +927,15 @@ where
                 ).await?;
             }
 
-            w5500
-                .write_to(
-                    socket.tx_register_at(0x00_00),
-                    &data[..data_length as usize],
-                )
-                .await?;
+            w5500.write_to(
+                socket.tx_register_at(0x00_00),
+                &data[..data_length as usize],
+            ).await?;
 
-            w5500
-                .write_to(
-                    socket.at(SocketRegister::Command),
-                    &[SocketCommand::Send as u8],
-                )
-                .await?;
+            w5500.write_to(
+                socket.at(SocketRegister::Command),
+                &[SocketCommand::Send as u8],
+            ).await?;
 
             for _ in 0..0xFFFF {
                 // wait until sent
@@ -1019,15 +951,13 @@ where
             self.network
                 .listen_udp(self.spi, SOCKET_UDP, SOCKET_UDP_PORT)
             */
-            w5500
-                .write_to(
-                    socket.at(SocketRegister::Mode),
-                    &[
-                        Protocol::UDP as u8,       // Socket Mode Register
-                        SocketCommand::Open as u8, // Socket Command Register
-                    ],
-                )
-                .await?;
+            w5500.write_to(
+                socket.at(SocketRegister::Mode),
+                &[
+                    Protocol::UDP as u8,       // Socket Mode Register
+                    SocketCommand::Open as u8, // Socket Command Register
+                ],
+            ).await?;
             Ok(())
         }
     }
@@ -1097,24 +1027,45 @@ pub enum SocketCommand {
     Recv = 0x40,
 }
 
-#[repr(u8)]
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum SocketStatus {
-    Closed = 0x00,
-    Init = 0x13,
-    Listen = 0x14,
-    Established = 0x17,
-    CloseWait = 0x1C,
-    SockUdp = 0x22,
-    Macraw = 0x42,
+    Closed,
+    Init,
+    Listen,
+    SynSent,
+    SynRecv,
+    Established,
+    FinWait,
+    Closing,
+    TimeWait,
+    CloseWait,
+    LastAck,
+    SockUdp,
+    MacRaw,
 
-    // Temp status
-    SynSent = 0x15,
-    SynRecv = 0x16,
-    FinWait = 0x18,
-    Closing = 0x1A,
-    TimeWait = 0x1B,
-    LastAck = 0x1D,
+    Unknown(u8),
+}
+
+impl SocketStatus {
+    fn from_u8(n: u8) -> Self {
+        match n {
+            0x00 => Self::Closed,
+            0x13 => Self::Init,
+            0x14 => Self::Listen,
+            0x15 => Self::SynSent,
+            0x16 => Self::SynRecv,
+            0x17 => Self::Established,
+            0x18 => Self::FinWait,
+            0x1a => Self::Closing,
+            0x1b => Self::TimeWait,
+            0x1c => Self::CloseWait,
+            0x1d => Self::LastAck,
+            0x22 => Self::SockUdp,
+            0x42 => Self::MacRaw,
+
+            n => Self::Unknown(n)
+        }
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, PartialOrd, Debug)]
