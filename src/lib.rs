@@ -1,6 +1,6 @@
 #![feature(async_closure)]
 #![no_std]
-#![feature(type_alias_impl_trait)]
+#![feature(min_type_alias_impl_trait)]
 #![feature(member_constraints)]
 #![feature(generic_associated_types)]
 #![allow(incomplete_features)]
