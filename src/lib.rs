@@ -1,14 +1,11 @@
 #![feature(async_closure)]
 #![no_std]
-#![feature(min_type_alias_impl_trait)]
-#![feature(member_constraints)]
+#![feature(type_alias_impl_trait)]
 #![feature(generic_associated_types)]
 #![allow(incomplete_features)]
 
-extern crate alloc;
-
-use async_embedded_traits::spi::AsyncTransfer;
 use core::future::Future;
+use embassy_traits::spi::FullDuplex;
 use embedded_hal::digital::v2::OutputPin;
 
 use byteorder::BigEndian;
@@ -167,7 +164,7 @@ impl<'b, 'a, PinError: Send> W5500<'a, PinError> {
         }
     }
 
-    pub async fn with_initialisation<'c, SPI: AsyncTransfer>(
+    pub async fn with_initialisation<'c, SPI: FullDuplex<u8>>(
         chip_select: &'a mut (dyn OutputPin<Error = PinError> + Send),
         spi: &'c mut SPI,
         wol: OnWakeOnLan,
@@ -198,7 +195,7 @@ impl<'b, 'a, PinError: Send> W5500<'a, PinError> {
         }
     }
 
-    pub fn activate<'c, SPI: AsyncTransfer>(
+    pub fn activate<'c, SPI: FullDuplex<u8>>(
         &'b mut self,
         spi: &'c mut SPI,
     ) -> Result<ActiveW5500<'b, 'a, 'c, SPI, PinError>, SPI::Error> {
@@ -206,12 +203,12 @@ impl<'b, 'a, PinError: Send> W5500<'a, PinError> {
     }
 }
 
-pub struct ActiveW5500<'a, 'b: 'a, 'c, SPI: AsyncTransfer, PinError: Send>(
+pub struct ActiveW5500<'a, 'b: 'a, 'c, SPI: FullDuplex<u8>, PinError: Send>(
     &'a mut W5500<'b, PinError>,
     &'c mut SPI,
 );
 
-impl<SPI: AsyncTransfer, PinError: Send> ActiveW5500<'_, '_, '_, SPI, PinError> {
+impl<SPI: FullDuplex<u8>, PinError: Send> ActiveW5500<'_, '_, '_, SPI, PinError> {
     pub fn take_socket(&mut self, socket: Socket) -> Option<UninitializedSocket> {
         self.0.take_socket(socket)
     }
@@ -338,7 +335,7 @@ impl<SPI: AsyncTransfer, PinError: Send> ActiveW5500<'_, '_, '_, SPI, PinError> 
         ];
         BigEndian::write_u16(&mut request[..2], register.address());
 
-        let result = match self.write_bytes(&request).await {
+        let result = match self.write_header(&request).await {
             Ok(_) => self.read_bytes(target).await,
             Err(e) => Err(e),
         };
@@ -347,16 +344,8 @@ impl<SPI: AsyncTransfer, PinError: Send> ActiveW5500<'_, '_, '_, SPI, PinError> 
     }
 
     async fn read_bytes(&mut self, bytes: &mut [u8]) -> Result<(), SPI::Error> {
-        for byte in bytes {
-            *byte = self.read().await?;
-        }
+        self.1.read(bytes).await?;
         Ok(())
-    }
-
-    async fn read(&mut self) -> Result<u8, SPI::Error> {
-        let mut buf = [0x00];
-        self.1.async_transfer(&mut buf).await?;
-        Ok(buf[0])
     }
 
     async fn write_u8(&mut self, register: Register, value: u8) -> Result<(), SPI::Error> {
@@ -377,7 +366,7 @@ impl<SPI: AsyncTransfer, PinError: Send> ActiveW5500<'_, '_, '_, SPI, PinError> 
             register.control_byte() | COMMAND_WRITE | VARIABLE_DATA_LENGTH,
         ];
         BigEndian::write_u16(&mut request[..2], register.address());
-        let result = match self.write_bytes(&request).await {
+        let result = match self.write_header(&request).await {
             Ok(_) => self.write_bytes(data).await,
             Err(e) => Err(e),
         };
@@ -387,17 +376,13 @@ impl<SPI: AsyncTransfer, PinError: Send> ActiveW5500<'_, '_, '_, SPI, PinError> 
     }
 
     async fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), SPI::Error> {
-        for b in bytes {
-            self.write(*b).await?;
-        }
-        Ok(())
+        let mut padding = [0; 512]; // TODO: REMOVE
+        self.1.read_write(&mut padding[..bytes.len()], bytes).await // TODO: embassy spi.write_and_discard_rx()???
     }
 
-    async fn write(&mut self, byte: u8) -> Result<(), SPI::Error> {
-        self.1.async_transfer(&mut [byte]).await?;
-
-
-        Ok(())
+    async fn write_header(&mut self, bytes: &[u8; 3]) -> Result<(), SPI::Error> {
+        let mut padding = [0; 3];
+        self.1.read_write(&mut padding, bytes).await
     }
 
     fn chip_select(&mut self) -> Result<(), PinError> {
@@ -424,7 +409,7 @@ impl<SPI, PinError: Send> IntoTcpSocket
         UninitializedSocket,
     )
 where
-    SPI: AsyncTransfer + Send,
+    SPI: FullDuplex<u8> + Send,
     SPI::Error: Send,
     // SPI::TransferFuture<'static>: Send,
 {
@@ -532,7 +517,7 @@ pub trait IntoUdpSocket {
         Self: Sized;
 }
 
-impl<SPI: AsyncTransfer + Send, PinError: Send> IntoUdpSocket
+impl<SPI: FullDuplex<u8> + Send, PinError: Send> IntoUdpSocket
     for (
         &mut ActiveW5500<'_, '_, '_, SPI, PinError>,
         UninitializedSocket,
@@ -602,7 +587,7 @@ pub trait Tcp<E> {
     fn is_connected(&mut self) -> Self::IsConnectedFut<'_>;
 }
 
-impl<SPI: AsyncTransfer + Send, PinError: Send> Tcp<SPI::Error>
+impl<SPI: FullDuplex<u8> + Send, PinError: Send> Tcp<SPI::Error>
     for (&mut ActiveW5500<'_, '_, '_, SPI, PinError>, &TcpSocket)
 where
     // SPI::Error: Send + 'static,
@@ -812,7 +797,7 @@ pub trait Udp<E> {
     ) -> Self::BlockingSendFut<'a>;
 }
 
-impl<SPI: AsyncTransfer + Send, PinError: Send> Udp<SPI::Error>
+impl<SPI: FullDuplex<u8> + Send, PinError: Send> Udp<SPI::Error>
     for (&mut ActiveW5500<'_, '_, '_, SPI, PinError>, &UdpSocket)
 where
     // SPI::Error: Send + 'static,
