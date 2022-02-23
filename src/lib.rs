@@ -378,6 +378,7 @@ impl<SPI: FullDuplex<u8>, PinError: Send> ActiveW5500<'_, '_, '_, SPI, PinError>
     async fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), SPI::Error> {
         let mut padding = [0; 512]; // TODO: REMOVE
         self.1.read_write(&mut padding[..bytes.len()], bytes).await // TODO: embassy spi.write_and_discard_rx()???
+        // https://github.com/embassy-rs/embassy/issues/637
     }
 
     async fn write_header(&mut self, bytes: &[u8; 3]) -> Result<(), SPI::Error> {
