@@ -12,6 +12,6 @@ edition = "2018"
 
 [dependencies]
 byteorder = { version = "1.2.1", default-features = false }
+embassy-traits = "0.1.0"
 embedded-hal = "0.2.1"
 futures = { version = "0.3.5", default-features = false }
-async-embedded-traits = "0.1.0"
