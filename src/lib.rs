@@ -638,7 +638,7 @@ where
                 .read_u16(socket.at(SocketRegister::RxReceivedSize))
                 .await?;
             if s0 == s1 {
-                break s0 as u16;
+                break s0;
             }
         };
 
@@ -664,7 +664,7 @@ where
             w5500
                 .write_u16(
                     socket.at(SocketRegister::RxReadPointer),
-                    read_pointer.overflowing_add(receive_size).0 as u16,
+                    read_pointer.overflowing_add(receive_size).0,
                 )
                 .await?;
 
@@ -704,7 +704,7 @@ where
         w5500
             .write_u16(
                 socket.at(SocketRegister::TxWritePointer),
-                tx_write_pointer.overflowing_add(data_length as u16).0,
+                tx_write_pointer.overflowing_add(data_length).0,
             )
             .await?;
 
