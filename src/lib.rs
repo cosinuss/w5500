@@ -5,14 +5,9 @@
 #![allow(incomplete_features)]
 #![allow(clippy::unusual_byte_groupings)]
 
-use core::fmt::Debug;
-use core::future::Future;
+use core::{convert::TryFrom, fmt::Debug, future::Future, str::FromStr, task::Poll};
 
-use byteorder::BigEndian;
-use byteorder::ByteOrder;
-use core::convert::TryFrom;
-use core::str::FromStr;
-use core::task::Poll;
+use byteorder::{BigEndian, ByteOrder};
 use embedded_hal::digital::OutputPin;
 use embedded_hal_async::spi::SpiBus;
 use futures::TryFutureExt;
@@ -52,9 +47,7 @@ pub struct IpAddress {
 
 impl IpAddress {
     pub fn new(a0: u8, a1: u8, a2: u8, a3: u8) -> IpAddress {
-        IpAddress {
-            address: [a0, a1, a2, a3],
-        }
+        IpAddress { address: [a0, a1, a2, a3] }
     }
 }
 
@@ -74,11 +67,7 @@ impl TryFrom<&str> for IpAddress {
 
 impl ::core::fmt::Display for IpAddress {
     fn fmt(&self, f: &mut ::core::fmt::Formatter) -> ::core::fmt::Result {
-        write!(
-            f,
-            "{}.{}.{}.{}",
-            self.address[0], self.address[1], self.address[2], self.address[3],
-        )
+        write!(f, "{}.{}.{}.{}", self.address[0], self.address[1], self.address[2], self.address[3],)
     }
 }
 
@@ -89,9 +78,7 @@ pub struct MacAddress {
 
 impl MacAddress {
     pub fn new(a0: u8, a1: u8, a2: u8, a3: u8, a4: u8, a5: u8) -> MacAddress {
-        MacAddress {
-            address: [a0, a1, a2, a3, a4, a5],
-        }
+        MacAddress { address: [a0, a1, a2, a3, a4, a5] }
     }
 }
 
@@ -335,11 +322,8 @@ impl<SPI: SpiBus, PinError: Send + Debug> ActiveW5500<'_, '_, '_, SPI, PinError>
 
     async fn read_from(&mut self, register: Register, target: &mut [u8]) -> Result<(), SPI::Error> {
         self.chip_select();
-        let mut request = [
-            0_u8,
-            0_u8,
-            register.control_byte() | COMMAND_READ | VARIABLE_DATA_LENGTH,
-        ];
+        let mut request =
+            [0_u8, 0_u8, register.control_byte() | COMMAND_READ | VARIABLE_DATA_LENGTH];
         BigEndian::write_u16(&mut request[..2], register.address());
 
         let result = match self.write_header(&request).await {
@@ -367,11 +351,8 @@ impl<SPI: SpiBus, PinError: Send + Debug> ActiveW5500<'_, '_, '_, SPI, PinError>
 
     async fn write_to(&mut self, register: Register, data: &[u8]) -> Result<(), SPI::Error> {
         self.chip_select();
-        let mut request = [
-            0_u8,
-            0_u8,
-            register.control_byte() | COMMAND_WRITE | VARIABLE_DATA_LENGTH,
-        ];
+        let mut request =
+            [0_u8, 0_u8, register.control_byte() | COMMAND_WRITE | VARIABLE_DATA_LENGTH];
         BigEndian::write_u16(&mut request[..2], register.address());
         let result = match self.write_header(&request).await {
             Ok(_) => self.write_bytes(data).await,
@@ -404,20 +385,20 @@ impl<SPI: SpiBus, PinError: Send + Debug> ActiveW5500<'_, '_, '_, SPI, PinError>
 
 pub trait IntoTcpSocket {
     async fn try_into_tcp_server_socket(self, port: u16) -> Result<TcpSocket, UninitializedSocket>;
-    async fn try_into_tcp_client_socket(self, ip: IpAddress, port: u16) -> Result<TcpSocket, UninitializedSocket>;
+    async fn try_into_tcp_client_socket(
+        self,
+        ip: IpAddress,
+        port: u16,
+    ) -> Result<TcpSocket, UninitializedSocket>;
 }
 
 impl<'a, 'w5500: 'a, 'pin: 'w5500, 'spi: 'a, SPI, PinError: Send + Debug> IntoTcpSocket
-    for (
-        &'a mut ActiveW5500<'w5500, 'pin, 'spi, SPI, PinError>,
-        UninitializedSocket,
-    )
+    for (&'a mut ActiveW5500<'w5500, 'pin, 'spi, SPI, PinError>, UninitializedSocket)
 where
     PinError: 'pin,
     SPI: 'spi + SpiBus + Send,
     SPI::Error: Send,
 {
-
     async fn try_into_tcp_server_socket(self, port: u16) -> Result<TcpSocket, UninitializedSocket> {
         let (w5500, UninitializedSocket(socket)) = self;
 
@@ -432,10 +413,10 @@ where
             // open the TCP socket
             // the Command register directly follows the Mode register so we can write to both at once
             w5500
-                .write_to(
-                    socket.at(SocketRegister::Mode),
-                    &[Protocol::TCP as u8, SocketCommand::Open as u8],
-                )
+                .write_to(socket.at(SocketRegister::Mode), &[
+                    Protocol::TCP as u8,
+                    SocketCommand::Open as u8,
+                ])
                 .await?;
 
             // wait for the socket to be ready
@@ -445,10 +426,7 @@ where
 
             // start listening
             w5500
-                .write_u8(
-                    socket.at(SocketRegister::Command),
-                    SocketCommand::Listen as u8,
-                )
+                .write_u8(socket.at(SocketRegister::Command), SocketCommand::Listen as u8)
                 .await?;
 
             // wait for the socket to start listening
@@ -458,10 +436,15 @@ where
 
             Ok(TcpSocket(socket)) as Result<_, SPI::Error>
         }
-        .map_err(move |_: SPI::Error| UninitializedSocket(socket)).await
+        .map_err(move |_: SPI::Error| UninitializedSocket(socket))
+        .await
     }
 
-    async fn try_into_tcp_client_socket(self, ip: IpAddress, port: u16) -> Result<TcpSocket, UninitializedSocket> {
+    async fn try_into_tcp_client_socket(
+        self,
+        ip: IpAddress,
+        port: u16,
+    ) -> Result<TcpSocket, UninitializedSocket> {
         let (w5500, UninitializedSocket(socket)) = self;
 
         async move {
@@ -498,13 +481,10 @@ where
             // open the TCP socket
             // the Command register directly follows the Mode register so we can write to both at once
             w5500
-                .write_to(
-                    socket.at(SocketRegister::Mode),
-                    &[
-                        Protocol::TCP as u8,       // Socket Mode Register
-                        SocketCommand::Open as u8, // Socket Command Register
-                    ],
-                )
+                .write_to(socket.at(SocketRegister::Mode), &[
+                    Protocol::TCP as u8,       // Socket Mode Register
+                    SocketCommand::Open as u8, // Socket Command Register
+                ])
                 .await?;
 
             // wait for the socket to be ready
@@ -514,10 +494,7 @@ where
 
             // issue the connect command
             w5500
-                .write_u8(
-                    socket.at(SocketRegister::Command),
-                    SocketCommand::Connect as u8,
-                )
+                .write_u8(socket.at(SocketRegister::Command), SocketCommand::Connect as u8)
                 .await?;
 
             // wait for the connection to be established
@@ -534,7 +511,8 @@ where
 
             Ok(TcpSocket(socket)) as Result<_, SPI::Error>
         }
-        .map_err(move |_: SPI::Error| UninitializedSocket(socket)).await
+        .map_err(move |_: SPI::Error| UninitializedSocket(socket))
+        .await
     }
 }
 
@@ -543,18 +521,20 @@ pub trait IntoUdpSocket {
     async fn try_into_udp_client_socket(self, port: u16) -> Result<UdpSocket, UninitializedSocket>;
 }
 
-impl<'a, 'w5500: 'a, 'pin: 'w5500, 'spi: 'a, SPI: SpiBus + Send, PinError: Send + Debug + 'static>
-    IntoUdpSocket
-    for (
-        &'a mut ActiveW5500<'w5500, 'pin, 'spi, SPI, PinError>,
-        UninitializedSocket,
-    )
+impl<
+        'a,
+        'w5500: 'a,
+        'pin: 'w5500,
+        'spi: 'a,
+        SPI: SpiBus + Send,
+        PinError: Send + Debug + 'static,
+    > IntoUdpSocket
+    for (&'a mut ActiveW5500<'w5500, 'pin, 'spi, SPI, PinError>, UninitializedSocket)
 where
     PinError: 'pin,
     SPI: 'spi + SpiBus + Send,
     SPI::Error: Send,
 {
-
     async fn try_into_udp_server_socket(self, port: u16) -> Result<UdpSocket, UninitializedSocket> {
         let (w5500, UninitializedSocket(socket)) = self;
 
@@ -566,18 +546,16 @@ where
                 .await?;
 
             w5500
-                .write_to(
-                    socket.at(SocketRegister::Mode),
-                    &[
-                        Protocol::UDP as u8,       // Socket Mode Register
-                        SocketCommand::Open as u8, // Socket Command Register
-                    ],
-                )
+                .write_to(socket.at(SocketRegister::Mode), &[
+                    Protocol::UDP as u8,       // Socket Mode Register
+                    SocketCommand::Open as u8, // Socket Command Register
+                ])
                 .await?;
 
             Ok(UdpSocket(socket))
         }
-        .map_err(move |_: SPI::Error| UninitializedSocket(socket)).await
+        .map_err(move |_: SPI::Error| UninitializedSocket(socket))
+        .await
     }
 
     async fn try_into_udp_client_socket(self, port: u16) -> Result<UdpSocket, UninitializedSocket> {
@@ -591,41 +569,50 @@ where
                 .await?;
 
             w5500
-                .write_to(
-                    socket.at(SocketRegister::Mode),
-                    &[Protocol::UDP as u8, SocketCommand::Open as u8],
-                )
+                .write_to(socket.at(SocketRegister::Mode), &[
+                    Protocol::UDP as u8,
+                    SocketCommand::Open as u8,
+                ])
                 .await?;
 
             Ok(UdpSocket(socket))
         }
-        .map_err(move |_: SPI::Error| UninitializedSocket(socket)).await
+        .map_err(move |_: SPI::Error| UninitializedSocket(socket))
+        .await
     }
 }
 
 pub trait Tcp<E> {
     type Error;
 
-    async fn receive<'a>(&'a mut self, target_buffer: &'a mut [u8]) -> Result<Option<(IpAddress, u16, usize)>, Self::Error>;
+    async fn receive<'a>(
+        &'a mut self,
+        target_buffer: &'a mut [u8],
+    ) -> Result<Option<(IpAddress, u16, usize)>, Self::Error>;
     async fn blocking_send<'a>(&'a mut self, data: &'a [u8]) -> Result<(), Self::Error>;
     async fn disconnect(&mut self) -> Result<(), Self::Error>;
     async fn reconnect(&mut self) -> Result<(), Self::Error>;
     async fn is_connected(&mut self) -> Result<bool, Self::Error>;
 }
 
-impl<'b, 'w5500: 'b, 'pin: 'w5500, 'spi: 'b, SPI: SpiBus + Send + 'static, PinError: Send + Debug + 'static>
-    Tcp<SPI::Error>
-    for (
-        &'b mut ActiveW5500<'w5500, 'pin, 'spi, SPI, PinError>,
-        &TcpSocket,
-    )
+impl<
+        'b,
+        'w5500: 'b,
+        'pin: 'w5500,
+        'spi: 'b,
+        SPI: SpiBus + Send + 'static,
+        PinError: Send + Debug + 'static,
+    > Tcp<SPI::Error> for (&'b mut ActiveW5500<'w5500, 'pin, 'spi, SPI, PinError>, &TcpSocket)
 where
     PinError: 'pin,
     SPI: 'spi + SpiBus + Send,
 {
     type Error = SPI::Error;
 
-    async fn receive<'a>(&'a mut self, destination: &'a mut [u8]) -> Result<Option<(IpAddress, u16, usize)>, SPI::Error> {
+    async fn receive<'a>(
+        &'a mut self,
+        destination: &'a mut [u8],
+    ) -> Result<Option<(IpAddress, u16, usize)>, SPI::Error> {
         let (w5500, TcpSocket(socket)) = self;
 
         if w5500.socket_status(socket).await? != SocketStatus::Established {
@@ -670,10 +657,7 @@ where
             let data_length = destination.len().min(receive_size as usize);
 
             w5500
-                .read_from(
-                    socket.rx_register_at(read_pointer),
-                    &mut destination[..data_length],
-                )
+                .read_from(socket.rx_register_at(read_pointer), &mut destination[..data_length])
                 .await?;
 
             // reset
@@ -685,10 +669,7 @@ where
                 .await?;
 
             w5500
-                .write_u8(
-                    socket.at(SocketRegister::Command),
-                    SocketCommand::Recv as u8,
-                )
+                .write_u8(socket.at(SocketRegister::Command), SocketCommand::Recv as u8)
                 .await?;
 
             Ok(Some((ip, port, receive_size as usize)))
@@ -712,10 +693,7 @@ where
             .await?;
 
         w5500
-            .write_to(
-                socket.tx_register_at(rx_read_pointer),
-                &data[..data_length as usize],
-            )
+            .write_to(socket.tx_register_at(rx_read_pointer), &data[..data_length as usize])
             .await?;
 
         // reset
@@ -731,10 +709,7 @@ where
             .await?;
 
         w5500
-            .write_u8(
-                socket.at(SocketRegister::Command),
-                SocketCommand::Send as u8,
-            )
+            .write_u8(socket.at(SocketRegister::Command), SocketCommand::Send as u8)
             .await?;
 
         for _ in 0..0xFFFF {
@@ -754,10 +729,7 @@ where
         let (w5500, TcpSocket(socket)) = self;
 
         w5500
-            .write_u8(
-                socket.at(SocketRegister::Command),
-                SocketCommand::Disconnect as u8,
-            )
+            .write_u8(socket.at(SocketRegister::Command), SocketCommand::Disconnect as u8)
             .await?;
 
         while w5500.socket_status(socket).await? == SocketStatus::FinWait {
@@ -769,7 +741,6 @@ where
         }
 
         Ok(())
-
     }
 
     async fn reconnect(&mut self) -> Result<(), SPI::Error> {
@@ -802,23 +773,17 @@ where
         }
 
         w5500
-            .write_u8(
-                socket.at(SocketRegister::Interrupt),
-                Interrupt::SendOk as u8,
-            )
+            .write_u8(socket.at(SocketRegister::Interrupt), Interrupt::SendOk as u8)
             .await?;
         w5500
             .write_u16(socket.at(SocketRegister::LocalPort), local_port)
             .await?;
 
         w5500
-            .write_to(
-                socket.at(SocketRegister::Mode),
-                &[
-                    Protocol::TCP as u8,       // Socket Mode Register
-                    SocketCommand::Open as u8, // Socket Command Register
-                ],
-            )
+            .write_to(socket.at(SocketRegister::Mode), &[
+                Protocol::TCP as u8,       // Socket Mode Register
+                SocketCommand::Open as u8, // Socket Command Register
+            ])
             .await?;
 
         while w5500.socket_status(socket).await? != SocketStatus::Init {
@@ -826,10 +791,10 @@ where
         }
 
         w5500
-            .write_to(
-                socket.at(SocketRegister::Mode),
-                &[Protocol::TCP as u8, SocketCommand::Connect as u8],
-            )
+            .write_to(socket.at(SocketRegister::Mode), &[
+                Protocol::TCP as u8,
+                SocketCommand::Connect as u8,
+            ])
             .await?;
 
         while w5500.socket_status(socket).await? != SocketStatus::Established {
@@ -871,11 +836,7 @@ pub trait Udp<E> {
 }
 
 impl<'b, 'w5500: 'b, 'pin: 'w5500, 'spi: 'b, SPI: SpiBus + Send, PinError: Send + Debug>
-    Udp<SPI::Error>
-    for (
-        &'b mut ActiveW5500<'w5500, 'pin, 'spi, SPI, PinError>,
-        &UdpSocket,
-    )
+    Udp<SPI::Error> for (&'b mut ActiveW5500<'w5500, 'pin, 'spi, SPI, PinError>, &UdpSocket)
 where
     PinError: 'pin,
     SPI: 'spi + SpiBus + Send,
@@ -948,10 +909,7 @@ where
                     .await?;
 
                 w5500
-                    .write_u8(
-                        socket.at(SocketRegister::Command),
-                        SocketCommand::Recv as u8,
-                    )
+                    .write_u8(socket.at(SocketRegister::Command), SocketCommand::Recv as u8)
                     .await?;
 
                 Ok(Some((ip, port, data_length)))
@@ -975,25 +933,22 @@ where
                 let host_port = host_port.to_be_bytes();
 
                 w5500
-                    .write_to(
-                        socket.at(SocketRegister::LocalPort),
-                        &[
-                            local_port[0],
-                            local_port[1], // local port u16
-                            0x00,
-                            0x00,
-                            0x00,
-                            0x00,
-                            0x00,
-                            0x00, // destination mac
-                            host.address[0],
-                            host.address[1],
-                            host.address[2],
-                            host.address[3], // target IP
-                            host_port[0],
-                            host_port[1], // destination port (5354)
-                        ],
-                    )
+                    .write_to(socket.at(SocketRegister::LocalPort), &[
+                        local_port[0],
+                        local_port[1], // local port u16
+                        0x00,
+                        0x00,
+                        0x00,
+                        0x00,
+                        0x00,
+                        0x00, // destination mac
+                        host.address[0],
+                        host.address[1],
+                        host.address[2],
+                        host.address[3], // target IP
+                        host_port[0],
+                        host_port[1], // destination port (5354)
+                    ])
                     .await?;
             }
 
@@ -1004,25 +959,21 @@ where
                 // TODO why write [0x00, 0x00] at TxReadPointer at all?
                 // TODO Is TxWritePointer not sufficient enough?
                 w5500
-                    .write_to(
-                        socket.at(SocketRegister::TxReadPointer),
-                        &[0x00, 0x00, data_length[0], data_length[1]],
-                    )
+                    .write_to(socket.at(SocketRegister::TxReadPointer), &[
+                        0x00,
+                        0x00,
+                        data_length[0],
+                        data_length[1],
+                    ])
                     .await?;
             }
 
             w5500
-                .write_to(
-                    socket.tx_register_at(0x00_00),
-                    &data[..data_length as usize],
-                )
+                .write_to(socket.tx_register_at(0x00_00), &data[..data_length as usize])
                 .await?;
 
             w5500
-                .write_to(
-                    socket.at(SocketRegister::Command),
-                    &[SocketCommand::Send as u8],
-                )
+                .write_to(socket.at(SocketRegister::Command), &[SocketCommand::Send as u8])
                 .await?;
 
             for _ in 0..0xFFFF {
@@ -1040,13 +991,10 @@ where
                 .listen_udp(self.spi, SOCKET_UDP, SOCKET_UDP_PORT)
             */
             w5500
-                .write_to(
-                    socket.at(SocketRegister::Mode),
-                    &[
-                        Protocol::UDP as u8,       // Socket Mode Register
-                        SocketCommand::Open as u8, // Socket Command Register
-                    ],
-                )
+                .write_to(socket.at(SocketRegister::Mode), &[
+                    Protocol::UDP as u8,       // Socket Mode Register
+                    SocketCommand::Open as u8, // Socket Command Register
+                ])
                 .await?;
             Ok(())
         }
